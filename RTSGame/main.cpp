@@ -1,71 +1,238 @@
 #include "raylib.h"
 #include "raymath.h"
+#include "raygui.h"
 #include <vector>
 #include "UnitArmy.h"
 #include <random>
+
 using namespace std;
+constexpr auto SIZE_NODE = 1.0f;
+constexpr auto HEIGHT = 25;
+constexpr auto WIDTH = 25;
 
+struct PathNode {
+    Vector2 position;
+    int connections[8][2];
+    int connectionCount;
+};
 
-
-bool CheckCollisionRayBox(Ray ray, BoundingBox box) {
-    float tmin = (box.min.x - ray.position.x) / ray.direction.x;
-    float tmax = (box.max.x - ray.position.x) / ray.direction.x;
-
-    if (tmin > tmax) {
-        float temp = tmin;
-        tmin = tmax;
-        tmax = temp;
-    }
-
-    float tymin = (box.min.y - ray.position.y) / ray.direction.y;
-    float tymax = (box.max.y - ray.position.y) / ray.direction.y;
-
-    if (tymin > tymax) {
-        float temp = tymin;
-        tymin = tymax;
-        tymax = temp;
-    }
-
-    if ((tmin > tymax) || (tymin > tmax))
-        return false;
-
-    if (tymin > tmin)
-        tmin = tymin;
-
-    if (tymax < tmax)
-        tmax = tymax;
-
-    float tzmin = (box.min.z - ray.position.z) / ray.direction.z;
-    float tzmax = (box.max.z - ray.position.z) / ray.direction.z;
-
-    if (tzmin > tzmax) {
-        float temp = tzmin;
-        tzmin = tzmax;
-        tzmax = temp;
-    }
-
-    if ((tmin > tzmax) || (tzmin > tmax))
-        return false;
-
-    return true;
-}
-
-#define SIZE_NODE 1.0f
-#define HEIGHT 25
-#define WIDTH 25
-
+struct AStarNode {
+    int nodeIndexX, nodeIndexY;
+    float gCost;
+    float fCost;
+    AStarNode* parentNode;
+};
 
 PathNode terrainGrid[HEIGHT][WIDTH];
+
+class UnitArmy {
+private:
+    Vector3 position;
+    Model model;
+    bool isSelected;
+    float collisionRadius = 0.7f;
+    AStarNode* path = nullptr;
+    Vector3 goal;
+
+    void rotateTowardsGoal() {
+        Vector3 direction = Vector3Subtract(goal, position);
+        if (Vector3Length(direction) > 0.1f) {
+            direction = Vector3Normalize(direction);
+            float angle = atan2f(direction.x, direction.z) * RAD2DEG;
+            model.transform = MatrixRotateY(angle * DEG2RAD);
+        }
+    }
+
+public:
+    bool getIsSelected() const { return isSelected; }
+    void setIsSelected(bool isSelected) { this->isSelected = isSelected; }
+    Vector3 getPosition() const { return position; }
+
+    void setPath(AStarNode* path) {
+        this->path = path;
+        if (path != nullptr) {
+            goal = Vector3{ terrainGrid[path->nodeIndexX][path->nodeIndexY].position.x, 0.0f, terrainGrid[path->nodeIndexX][path->nodeIndexY].position.y };
+        }
+    }
+
+    float getCollisionRadius() const { return collisionRadius; }
+
+    UnitArmy(const Vector3& position, const Model& model, bool isSelected)
+        : position(position), model(model), isSelected(isSelected) {
+        goal = position;
+    }
+
+    void anim() {
+        float moveSpeed = 0.075f;
+
+        if (path != nullptr) {
+            Vector3 direction = Vector3Subtract(goal, position);
+            float distance = Vector3Length(direction);
+
+            if (!Vector3Equals(position, goal) && distance >= moveSpeed) {
+                position = Vector3Add(position, Vector3Scale(Vector3Normalize(direction), moveSpeed));
+            }
+            else {
+                path = path->parentNode;
+                if (path != nullptr)
+                {
+
+                    goal = Vector3{ terrainGrid[path->nodeIndexX][path->nodeIndexY].position.x, 0.0f, terrainGrid[path->nodeIndexX][path->nodeIndexY].position.y };
+                    #ifdef DEBUG
+
+                    printf("Node Index: (%d, %d), gCost: %f, fCost: %f\n", path->nodeIndexX, path->nodeIndexY, path->gCost, path->fCost);
+                    printf("Nowy cel: (%.2f, %.2f)\n", goal.x, goal.z);
+                    #endif // DEBUG
+
+                }
+            }
+        }
+
+        rotateTowardsGoal();
+        DrawModel(model, position, 1.0f, isSelected ? WHITE : LIGHTGRAY);
+    }
+
+};
+
+
+// Funkcja heurystyczna - u¿ywamy odleg³oœci Manhattan
+float Heuristic(Vector2 a, Vector2 b) {
+    return fabsf(a.x - b.x) + fabsf(a.y - b.y);
+}
+
+// Znajdowanie wêz³a z najni¿szym fCost na liœcie
+int GetLowestFCostIndex(AStarNode* nodes, int count) {
+    int lowestIndex = 0;
+    for (int i = 1; i < count; i++) {
+        if (nodes[i].fCost < nodes[lowestIndex].fCost) {
+            lowestIndex = i;
+        }
+    }
+    return lowestIndex;
+}
+
+// Sprawdza, czy lista zawiera wêze³ o danym indeksie
+bool ContainsNode(AStarNode* nodes, int count, int nodeIndexX, int nodeIndexY) {
+    for (int i = 0; i < count; i++) {
+        if (nodes[i].nodeIndexX == nodeIndexX && nodes[i].nodeIndexY == nodeIndexY) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Znajdowanie wêz³a w liœcie
+AStarNode* FindNode(AStarNode* nodes, int count, int nodeIndexX, int nodeIndexY) {
+    for (int i = 0; i < count; i++) {
+        if (nodes[i].nodeIndexX == nodeIndexX && nodes[i].nodeIndexY == nodeIndexY) {
+            return &nodes[i];
+        }
+    }
+    return NULL;
+}
+
+
+// Implementacja A*
+AStarNode* AStar(int startX, int startY, int goalX, int goalY) {
+    AStarNode* openList = (AStarNode*)malloc(HEIGHT * WIDTH * sizeof(AStarNode));
+    AStarNode* closedList = (AStarNode*)malloc(HEIGHT * WIDTH * sizeof(AStarNode));
+    int openCount = 0;
+    int closedCount = 0;
+
+    // Inicjalizacja wêz³a startowego
+    openList[openCount++] = AStarNode{ startX, startY, 0.0f, Heuristic(terrainGrid[startY][startX].position, terrainGrid[goalY][goalX].position), NULL };
+
+    while (openCount > 0) {
+        // ZnajdŸ wêze³ z najni¿szym fCost
+        int currentIndex = GetLowestFCostIndex(openList, openCount);
+        AStarNode currentNode = openList[currentIndex];
+
+        // Przenieœ currentNode z openList do closedList
+        openList[currentIndex] = openList[--openCount];
+        closedList[closedCount++] = currentNode;
+
+        // Jeœli osi¹gnêliœmy cel, zwróæ œcie¿kê
+        if (currentNode.nodeIndexX == goalX && currentNode.nodeIndexY == goalY) {
+            AStarNode* path = (AStarNode*)malloc(closedCount * sizeof(AStarNode));
+            AStarNode* node = &closedList[closedCount - 1];
+            int pathCount = 0;
+            while (node != NULL) {
+                path[pathCount++] = *node;
+                node = node->parentNode;
+            }
+
+            // Ustaw wskaŸniki parentNode, aby wskazywa³y na nastêpny wêze³
+            for (int i = pathCount - 1; i > 0; i--) {
+                path[i].parentNode = &path[i - 1];
+            }
+            path[0].parentNode = NULL;
+
+            free(openList);
+            free(closedList);
+            return &path[pathCount - 1]; // Zwracamy wskaŸnik do pierwszego elementu œcie¿ki
+        }
+
+        // Przetwarzaj s¹siadów
+        for (int i = 0; i < terrainGrid[currentNode.nodeIndexY][currentNode.nodeIndexX].connectionCount; i++) {
+            int neighborX = terrainGrid[currentNode.nodeIndexY][currentNode.nodeIndexX].connections[i][0];
+            int neighborY = terrainGrid[currentNode.nodeIndexY][currentNode.nodeIndexX].connections[i][1];
+
+            // Jeœli s¹siad jest ju¿ w closedList, pomiñ
+            if (ContainsNode(closedList, closedCount, neighborX, neighborY)) continue;
+
+            float tentativeGCost = currentNode.gCost + Heuristic(terrainGrid[currentNode.nodeIndexY][currentNode.nodeIndexX].position, terrainGrid[neighborY][neighborX].position);
+
+            AStarNode* neighborNode = FindNode(openList, openCount, neighborX, neighborY);
+            if (neighborNode == NULL) {
+                // Dodaj nowy wêze³ do openList
+                openList[openCount++] = AStarNode{
+                    neighborX, neighborY,
+                    tentativeGCost,
+                    tentativeGCost + Heuristic(terrainGrid[neighborY][neighborX].position, terrainGrid[goalY][goalX].position),
+                    &closedList[closedCount - 1]
+                };
+            }
+            else if (tentativeGCost < neighborNode->gCost) {
+                // Aktualizuj koszt i rodzica istniej¹cego wêz³a
+                neighborNode->gCost = tentativeGCost;
+                neighborNode->fCost = tentativeGCost + Heuristic(terrainGrid[neighborY][neighborX].position, terrainGrid[goalY][goalX].position);
+                neighborNode->parentNode = &closedList[closedCount - 1];
+            }
+        }
+    }
+
+    free(openList);
+    free(closedList);
+    return NULL;  // Brak œcie¿ki
+}
+
+Vector2 FindNearestPathNode(Vector2 position) {
+    Vector2 nearestIndex = { -1, -1 };
+    float nearestDistance = FLT_MAX;
+
+    for (size_t y = 0; y < HEIGHT; y++) {
+        for (size_t x = 0; x < WIDTH; x++) {
+            float distance = Vector2Distance(position, terrainGrid[y][x].position);
+            if (distance < nearestDistance) {
+                nearestDistance = distance;
+                nearestIndex.x = x;
+                nearestIndex.y = y;
+            }
+        }
+    }
+
+    return nearestIndex;
+}
 
 void initTerrainGrid() {
     for (size_t i = 0; i < HEIGHT; i++) {
         for (size_t j = 0; j < WIDTH; j++) {
-            Vector2 position = { i * SIZE_NODE-(HEIGHT*SIZE_NODE/2) , j * SIZE_NODE - (WIDTH * SIZE_NODE / 2) };
-            PathNode* node = &terrainGrid[i][j];
-            node->position = position;
+            Vector2 position = { (float)i * SIZE_NODE - (HEIGHT * SIZE_NODE / 2), (float)j * SIZE_NODE - (WIDTH * SIZE_NODE / 2) };
+            terrainGrid[i][j].position = position;
         }
     }
 }
+
 void drawTerrainGrid() {
     for (size_t i = 0; i < HEIGHT; i++) {
         for (size_t j = 0; j < WIDTH; j++) {
@@ -141,11 +308,15 @@ int main(void)
 {
     const int screenWidth = 1500;
     const int screenHeight = 700;
+
     SetConfigFlags(FLAG_WINDOW_RESIZABLE);
+
     InitWindow(screenWidth, screenHeight, "RTS");
+
     initTerrainGrid();
+
     BoundingBox nonWalkableColliders[1] = {
-        { Vector3 { 5.0f, -0.1f, 5.0f }, Vector3 { 6.0f, 1.0f, 6.0f } } // Przyk³adowa przeszkoda
+        { Vector3 { 5.0f, -0.1f, 5.0f }, Vector3 { 8.0f, 1.0f, 8.0f } } // Przyk³adowa przeszkoda
     };
     int colliderCount = 1;
 
@@ -154,6 +325,8 @@ int main(void)
             FindNeighbors(i * WIDTH + j, nonWalkableColliders, colliderCount);
         }
     }
+
+    
     Camera camera = { 0 };
     camera.position = Vector3{ 5.0f, 5.0f, 5.0f };
     camera.target = Vector3{ 0.0f, 2.0f, 0.0f };
@@ -176,6 +349,32 @@ int main(void)
     Vector2 mouseStart = { 0.0f, 0.0f };
     Vector2 mouseEnd = { 0.0f, 0.0f };
     bool isSelecting = false;
+
+    Vector3 p1 = { terrainGrid[0][0].position.x , 0.0f , terrainGrid[0][0].position.y };
+    Vector3 p4 = { terrainGrid[0][WIDTH-1].position.x , 0.0f , terrainGrid[0][WIDTH - 1].position.y };
+    Vector3 p3 = { terrainGrid[HEIGHT - 1][WIDTH - 1].position.x , 0.0f , terrainGrid[HEIGHT - 1][WIDTH - 1].position.y };
+    Vector3 p2 = { terrainGrid[HEIGHT - 1][0].position.x , 0.0f , terrainGrid[HEIGHT - 1][0].position.y };
+    #ifdef DEBUG
+
+    printf("P1: (%.2f, %.2f, %.2f)\n", p1.x, p1.y, p1.z);
+    printf("P2: (%.2f, %.2f, %.2f)\n", p2.x, p2.y, p2.z);
+    printf("P3: (%.2f, %.2f, %.2f)\n", p3.x, p3.y, p3.z);
+    printf("P4: (%.2f, %.2f, %.2f)\n", p4.x, p4.y, p4.z);
+
+    #endif // DEBUG
+
+    Shader shader = LoadShader("shader.vs", "shader.fs");
+
+    // Ustawienie lokalizacji uniformów
+    int viewPosLoc = GetShaderLocation(shader, "viewPosition");
+    int lightPosLoc = GetShaderLocation(shader, "lightPosition");
+    int lightColorLoc = GetShaderLocation(shader, "lightColor");
+    int modelColorLoc = GetShaderLocation(shader, "modelColor");
+
+    Vector3 lightPosition = { 2.0f, 4.0f, 2.0f };
+    Vector3 lightColor = { 1.0f, 1.0f, 1.0f };
+    Vector4 modelColor = { 1.0f, 0.5f, 0.31f, 1.0f }; // Przyk³adowy kolor modelu
+
     while (!WindowShouldClose())
     {
 
@@ -197,6 +396,11 @@ int main(void)
         if (IsKeyDown(KEY_D)) movement.y += 0.1f;
 
         UpdateCameraPro(&camera, movement, Vector3Zero(), 0.0f);
+        // Przekazanie pozycji kamery i œwiat³a do shaderów
+        SetShaderValue(shader, viewPosLoc, &camera.position, SHADER_UNIFORM_VEC3);
+        SetShaderValue(shader, lightPosLoc, &lightPosition, SHADER_UNIFORM_VEC3);
+        SetShaderValue(shader, lightColorLoc, &lightColor, SHADER_UNIFORM_VEC3);
+        SetShaderValue(shader, modelColorLoc, &modelColor, SHADER_UNIFORM_VEC4);
 
         camera.target = Vector3Add(camera.position, Vector3Normalize(Vector3Subtract(camera.target, camera.position)));
 
@@ -250,8 +454,8 @@ int main(void)
             {
                 Vector3 modelPos = Units[i].getPosition();
                 BoundingBox box = { Vector3{ modelPos.x - 1.0f, modelPos.y - 1.0f, modelPos.z - 1.0f }, Vector3{ modelPos.x + 1.0f, modelPos.y + 1.0f, modelPos.z + 1.0f } };
-
-                if (CheckCollisionRayBox(ray, box))
+                RayCollision collision = GetRayCollisionBox(ray, box);
+                if (collision.hit)
                 {
                     Units[i].setIsSelected(!Units[i].getIsSelected());
                 }
@@ -263,23 +467,25 @@ int main(void)
             Vector2 mousePos = GetMousePosition();
             Ray ray = GetMouseRay(mousePos, camera);
 
-            Vector3 p1 = { -50.0f, 0.0f, -50.0f };
-            Vector3 p2 ={ 50.0f, 0.0f, -50.0f };
-            Vector3 p3 = { 50.0f, 0.0f, 50.0f };
-            Vector3 p4 = { -50.0f, 0.0f, 50.0f };
-
             RayCollision collision = GetRayCollisionQuad(ray, p1, p2, p3, p4);
-
             if (collision.hit)
             {
                 Vector3 baseGoal = collision.point;
+                #ifdef DEBUG
+
+                    printf("Wykryto kolizjê. Punkt kolizji: (%.2f, %.2f, %.2f)\n", baseGoal.x, baseGoal.y, baseGoal.z);
+
+                #endif // DEBUG
+
                 int selectedUnitCount = 0;
+
+                // Liczenie zaznaczonych jednostek
                 for (int i = 0; i < Units.size(); i++)
                 {
                     if (Units[i].getIsSelected())
                     {
                         selectedUnitCount++;
-                    } 
+                    }
                 }
 
                 int unitIndex = 0;
@@ -288,21 +494,32 @@ int main(void)
                     if (Units[i].getIsSelected()) {
                         float offset = (float)unitIndex - (selectedUnitCount - 1) / 2.0f;
                         Vector3 formationGoal = Vector3Add(baseGoal, Vector3{ offset * 2.0f, 0.0f, 0.0f });
+                        Vector2 goalNode = FindNearestPathNode(Vector2{ formationGoal.x, formationGoal.z });
+                        Vector3 position = Units[i].getPosition();
 
-                        // Ustaw now¹ œcie¿kê
-                        Units[i].setGoal(formationGoal);
+                        Vector2 positionNode = FindNearestPathNode(Vector2{ position.x, position.z });
+
+                        // Ustawienie nowej œcie¿ki dla ka¿dej zaznaczonej jednostki
+                        AStarNode* path = AStar(positionNode.y,
+                            positionNode.x,
+                            goalNode.y,
+                            goalNode.x
+                        );
+
+                        Units[i].setPath(path);
                         unitIndex++;
                     }
-
                 }
             }
         }
+
 
         BeginDrawing();
 
         ClearBackground(RAYWHITE);
 
         BeginMode3D(camera);
+
         drawTerrainGrid();
         DrawBoundingBox(nonWalkableColliders[0], BLACK);
         for (int i = 0; i < Units.size(); i++)
@@ -327,6 +544,7 @@ int main(void)
 
         EndDrawing();
     }
+    UnloadShader(shader);
 
     UnloadModel(modelArch);
     CloseWindow();
