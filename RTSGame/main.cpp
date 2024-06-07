@@ -1,14 +1,14 @@
 #include "raylib.h"
 #include "raymath.h"
 #include "raygui.h"
-#include <vector>
 #include "UnitArmy.h"
-#include <random>
 
+//#define DEBUG
 using namespace std;
 constexpr auto SIZE_NODE = 1.0f;
-constexpr auto HEIGHT = 25;
-constexpr auto WIDTH = 25;
+constexpr auto HEIGHT = 50;
+constexpr auto WIDTH = 50;
+#define ARRAY_SIZE(arr) (sizeof(arr) / sizeof(arr[0]))
 
 struct PathNode {
     Vector2 position;
@@ -25,17 +25,21 @@ struct AStarNode {
 
 PathNode terrainGrid[HEIGHT][WIDTH];
 
+
 class UnitArmy {
 private:
     Vector3 position;
     Model model;
+    ModelAnimation animData;
     bool isSelected;
     float collisionRadius = 0.7f;
     AStarNode* path = nullptr;
     Vector3 goal;
+    float animFrame = 0.0f;
+    float animSpeed = 1.0f;
 
     void rotateTowardsGoal() {
-        Vector3 direction = Vector3Subtract(goal, position);
+        Vector3 direction = Vector3Subtract(position, goal );
         if (Vector3Length(direction) > 0.1f) {
             direction = Vector3Normalize(direction);
             float angle = atan2f(direction.x, direction.z) * RAD2DEG;
@@ -57,9 +61,18 @@ public:
 
     float getCollisionRadius() const { return collisionRadius; }
 
-    UnitArmy(const Vector3& position, const Model& model, bool isSelected)
-        : position(position), model(model), isSelected(isSelected) {
+    UnitArmy(const Vector3& position, const Model& model, const ModelAnimation& animData, bool isSelected)
+        : position(position), model(model), animData(animData), isSelected(isSelected) {
         goal = position;
+        //model.transform = MatrixIdentity(); // Inicjalizacja transformacji modelu
+    }
+
+    void updateAnimation() {
+        if (animData.frameCount > 0) {
+            animFrame += animSpeed;
+            if (animFrame >= animData.frameCount) animFrame = 0.0f;
+            UpdateModelAnimation(model, animData, (int)animFrame);
+        }
     }
 
     void anim() {
@@ -71,29 +84,24 @@ public:
 
             if (!Vector3Equals(position, goal) && distance >= moveSpeed) {
                 position = Vector3Add(position, Vector3Scale(Vector3Normalize(direction), moveSpeed));
-            }
+    }
             else {
                 path = path->parentNode;
-                if (path != nullptr)
-                {
-
+                if (path != nullptr) {
                     goal = Vector3{ terrainGrid[path->nodeIndexX][path->nodeIndexY].position.x, 0.0f, terrainGrid[path->nodeIndexX][path->nodeIndexY].position.y };
-                    #ifdef DEBUG
-
+#ifdef DEBUG
                     printf("Node Index: (%d, %d), gCost: %f, fCost: %f\n", path->nodeIndexX, path->nodeIndexY, path->gCost, path->fCost);
                     printf("Nowy cel: (%.2f, %.2f)\n", goal.x, goal.z);
-                    #endif // DEBUG
-
+#endif // DEBUG
                 }
             }
-        }
+}
 
+        updateAnimation();
         rotateTowardsGoal();
-        DrawModel(model, position, 1.0f, isSelected ? WHITE : LIGHTGRAY);
+        DrawModel(model, position, .2f, isSelected ? WHITE : LIGHTGRAY);
     }
-
 };
-
 
 // Funkcja heurystyczna - u¿ywamy odleg³oœci Manhattan
 float Heuristic(Vector2 a, Vector2 b) {
@@ -131,8 +139,6 @@ AStarNode* FindNode(AStarNode* nodes, int count, int nodeIndexX, int nodeIndexY)
     return NULL;
 }
 
-
-// Implementacja A*
 AStarNode* AStar(int startX, int startY, int goalX, int goalY) {
     AStarNode* openList = (AStarNode*)malloc(HEIGHT * WIDTH * sizeof(AStarNode));
     AStarNode* closedList = (AStarNode*)malloc(HEIGHT * WIDTH * sizeof(AStarNode));
@@ -206,6 +212,8 @@ AStarNode* AStar(int startX, int startY, int goalX, int goalY) {
     return NULL;  // Brak œcie¿ki
 }
 
+
+
 Vector2 FindNearestPathNode(Vector2 position) {
     Vector2 nearestIndex = { -1, -1 };
     float nearestDistance = FLT_MAX;
@@ -259,9 +267,9 @@ bool PointOutsideMap(Vector3 point) {
     return point.x < 0 || point.y < 0 || point.x >= WIDTH * SIZE_NODE || point.y >= HEIGHT * SIZE_NODE;
 }
 
-void FindNeighbors(int nodeIndex, BoundingBox* nonWalkableColliders, int colliderCount) {
-    int x = nodeIndex % WIDTH;
-    int y = nodeIndex / WIDTH;
+void FindNeighbors(int nodeIndexX, int nodeIndexY, BoundingBox* nonWalkableColliders, int colliderCount) {
+    int x = nodeIndexX;
+    int y = nodeIndexY;
     PathNode* node = &terrainGrid[y][x];
     Vector2 position = node->position;
 
@@ -276,6 +284,7 @@ void FindNeighbors(int nodeIndex, BoundingBox* nonWalkableColliders, int collide
     for (int i = 0; i < 8; i++) {
         int nx = x + delta[i][0];
         int ny = y + delta[i][1];
+            bool hasCollision = false;
 
         if (nx >= 0 && ny >= 0 && nx < WIDTH && ny < HEIGHT) {
             PathNode* neighbour = &terrainGrid[ny][nx];
@@ -285,10 +294,9 @@ void FindNeighbors(int nodeIndex, BoundingBox* nonWalkableColliders, int collide
             Vector2 rayDir = Vector2Normalize(Vector2Subtract(neighbourPosition, position));
             Ray connectionRay = { Vector3 { position.x, 0.0f, position.y }, Vector3 { rayDir.x, 0.0f, rayDir.y } };
 
-            bool hasCollision = false;
             for (int j = 0; j < colliderCount; j++) {
                 RayCollision collision = GetRayCollisionBox(connectionRay, nonWalkableColliders[j]);
-                if (collision.hit && collision.distance <= distance) {
+                if (collision.hit && collision.distance<= distance) {
                     hasCollision = true;
                     break;
                 }
@@ -315,21 +323,25 @@ int main(void)
 
     initTerrainGrid();
 
-    BoundingBox nonWalkableColliders[1] = {
-        { Vector3 { 5.0f, -0.1f, 5.0f }, Vector3 { 8.0f, 1.0f, 8.0f } } // Przyk³adowa przeszkoda
+
+    BoundingBox nonWalkableColliders[] = {
+        { Vector3 { 5.0f, -0.2f, 5.0f }, Vector3 { 8.0f, 1.0f, 8.0f } }, // Przyk³adowa przeszkoda 1
+        { Vector3 { 7.0f, -0.2f, 7.0f }, Vector3 { 12.0f, 1.0f, 12.0f } } // Przyk³adowa przeszkoda 2
     };
-    int colliderCount = 1;
+
+    int colliderCount = ARRAY_SIZE(nonWalkableColliders);
+
 
     for (int i = 0; i < HEIGHT; i++) {
         for (int j = 0; j < WIDTH; j++) {
-            FindNeighbors(i * WIDTH + j, nonWalkableColliders, colliderCount);
+            FindNeighbors(i,j, nonWalkableColliders, colliderCount);
         }
     }
 
     
     Camera camera = { 0 };
     camera.position = Vector3{ 5.0f, 5.0f, 5.0f };
-    camera.target = Vector3{ 0.0f, 2.0f, 0.0f };
+    camera.target = Vector3{ 0.0f, 0.0f, 3.0f };
     camera.up = Vector3{ 0.0f, 1.0f, 0.0f };
     camera.fovy = 50.0f;
     camera.projection = CAMERA_PERSPECTIVE;
@@ -338,22 +350,27 @@ int main(void)
 
     ShowCursor();
 
-    Model modelArch = LoadModel("model/Archer_Unit.glb");
+    Model model = LoadModel("model/cock.glb");
+    
+    int numberofanimiation = 3;
+    ModelAnimation* modelAnim = LoadModelAnimations("model/cock.glb", &numberofanimiation);
+
+
 
     vector<UnitArmy> Units = {
-        UnitArmy(Vector3{ 0.0f, 0.0f, 0.0f }, modelArch, false),
-        UnitArmy(Vector3{ 3.0f, 0.0f, 0.0f }, modelArch, false),
-        UnitArmy(Vector3{ 6.0f, 0.0f, 0.0f }, modelArch, false)
+        UnitArmy(Vector3{ 0.0f, 0.0f, 0.0f }, model, modelAnim[2], false),
+        UnitArmy(Vector3{ 3.0f, 0.0f, 0.0f }, model,modelAnim[2], false),
+        UnitArmy(Vector3{ 6.0f, 0.0f, 0.0f }, model,modelAnim[2], false)
     };
 
     Vector2 mouseStart = { 0.0f, 0.0f };
     Vector2 mouseEnd = { 0.0f, 0.0f };
     bool isSelecting = false;
 
-    Vector3 p1 = { terrainGrid[0][0].position.x , 0.0f , terrainGrid[0][0].position.y };
-    Vector3 p4 = { terrainGrid[0][WIDTH-1].position.x , 0.0f , terrainGrid[0][WIDTH - 1].position.y };
-    Vector3 p3 = { terrainGrid[HEIGHT - 1][WIDTH - 1].position.x , 0.0f , terrainGrid[HEIGHT - 1][WIDTH - 1].position.y };
-    Vector3 p2 = { terrainGrid[HEIGHT - 1][0].position.x , 0.0f , terrainGrid[HEIGHT - 1][0].position.y };
+    Vector3 p3 = { terrainGrid[0][0].position.y , 0.0f , terrainGrid[0][0].position.x };
+    Vector3 p2 = { terrainGrid[0][WIDTH-1].position.y , 0.0f , terrainGrid[0][WIDTH - 1].position.x };
+    Vector3 p1 = { terrainGrid[HEIGHT - 1][WIDTH - 1].position.y , 0.0f , terrainGrid[HEIGHT - 1][WIDTH - 1].position.x };
+    Vector3 p4 = { terrainGrid[HEIGHT - 1][0].position.y , 0.0f , terrainGrid[HEIGHT - 1][0].position.x };
     #ifdef DEBUG
 
     printf("P1: (%.2f, %.2f, %.2f)\n", p1.x, p1.y, p1.z);
@@ -362,18 +379,6 @@ int main(void)
     printf("P4: (%.2f, %.2f, %.2f)\n", p4.x, p4.y, p4.z);
 
     #endif // DEBUG
-
-    Shader shader = LoadShader("shader.vs", "shader.fs");
-
-    // Ustawienie lokalizacji uniformów
-    int viewPosLoc = GetShaderLocation(shader, "viewPosition");
-    int lightPosLoc = GetShaderLocation(shader, "lightPosition");
-    int lightColorLoc = GetShaderLocation(shader, "lightColor");
-    int modelColorLoc = GetShaderLocation(shader, "modelColor");
-
-    Vector3 lightPosition = { 2.0f, 4.0f, 2.0f };
-    Vector3 lightColor = { 1.0f, 1.0f, 1.0f };
-    Vector4 modelColor = { 1.0f, 0.5f, 0.31f, 1.0f }; // Przyk³adowy kolor modelu
 
     while (!WindowShouldClose())
     {
@@ -396,11 +401,6 @@ int main(void)
         if (IsKeyDown(KEY_D)) movement.y += 0.1f;
 
         UpdateCameraPro(&camera, movement, Vector3Zero(), 0.0f);
-        // Przekazanie pozycji kamery i œwiat³a do shaderów
-        SetShaderValue(shader, viewPosLoc, &camera.position, SHADER_UNIFORM_VEC3);
-        SetShaderValue(shader, lightPosLoc, &lightPosition, SHADER_UNIFORM_VEC3);
-        SetShaderValue(shader, lightColorLoc, &lightColor, SHADER_UNIFORM_VEC3);
-        SetShaderValue(shader, modelColorLoc, &modelColor, SHADER_UNIFORM_VEC4);
 
         camera.target = Vector3Add(camera.position, Vector3Normalize(Vector3Subtract(camera.target, camera.position)));
 
@@ -499,7 +499,6 @@ int main(void)
 
                         Vector2 positionNode = FindNearestPathNode(Vector2{ position.x, position.z });
 
-                        // Ustawienie nowej œcie¿ki dla ka¿dej zaznaczonej jednostki
                         AStarNode* path = AStar(positionNode.y,
                             positionNode.x,
                             goalNode.y,
@@ -521,7 +520,11 @@ int main(void)
         BeginMode3D(camera);
 
         drawTerrainGrid();
-        DrawBoundingBox(nonWalkableColliders[0], BLACK);
+        for (size_t i = 0; i < colliderCount; i++)
+        {
+            DrawBoundingBox(nonWalkableColliders[i], BLACK);
+
+        }
         for (int i = 0; i < Units.size(); i++)
         {
             Units[i].anim();
@@ -544,9 +547,9 @@ int main(void)
 
         EndDrawing();
     }
-    UnloadShader(shader);
 
-    UnloadModel(modelArch);
+    UnloadModel(model);
+    UnloadModelAnimations(modelAnim, numberofanimiation);
     CloseWindow();
 
     return 0;
